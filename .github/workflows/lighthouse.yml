@@ -1,0 +1,139 @@
+name: Lighthouse CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '*.txt'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lighthouse:
+    name: Lighthouse Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DEPLOY_TARGET: vercel-preview
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SITE_URL: ${{ github.event.pull_request && format('https://{0}-{1}.vercel.app', github.event.pull_request.number, github.event.repository.name) || 'http://localhost:3000' }}
+          NODE_ENV: production
+
+      - name: Setup Lighthouse CI
+        run: npm install -g @lhci/cli
+
+      - name: Run Lighthouse CI
+        run: |
+          if [ -f "lighthouserc.json" ]; then
+            lhci autorun
+          else
+            echo "lighthouserc.json not found, using inline configuration"
+            lhci autorun --config="{\
+              \"ci\": {\
+                \"collect\": {\
+                  \"startServerCommand\": \"npm start\",\
+                  \"startServerReadyPattern\": \"ready\",\
+                  \"startServerReadyTimeout\": 60000,\
+                  \"url\": [\
+                    \"http://localhost:3000\",\
+                    \"http://localhost:3000/projects/sample-project\",\
+                    \"http://localhost:3000/blog/sample-post\",\
+                    \"http://localhost:3000/resume\",\
+                    \"http://localhost:3000/contact\"\
+                  ],\
+                  \"numberOfRuns\": 3\
+                },\
+                \"assert\": {\
+                  \"assertions\": {\
+                    \"categories:performance\": [\"error\", {\"minScore\": 0.9}],\
+                    \"categories:accessibility\": [\"error\", {\"minScore\": 0.95}],\
+                    \"categories:best-practices\": [\"error\", {\"minScore\": 0.9}],\
+                    \"categories:seo\": [\"error\", {\"minScore\": 0.95}],\
+                    \"metrics:largest-contentful-paint\": [\"error\", {\"maxNumericValue\": 2500}],\
+                    \"metrics:cumulative-layout-shift\": [\"error\", {\"maxNumericValue\": 0.1}],\
+                    \"metrics:total-blocking-time\": [\"error\", {\"maxNumericValue\": 200}],\
+                    \"resource-summary:script:size\": [\"warn\", {\"maxNumericValue\": 170000}],\
+                    \"resource-summary:total:size\": [\"warn\", {\"maxNumericValue\": 500000}]\
+                  }\
+                },\
+                \"upload\": {\
+                  \"target\": \"temporary-public-storage\"\
+                }\
+              }\
+            }"
+          fi
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_TOKEN }}
+          NEXT_PUBLIC_SITE_URL: ${{ github.event.pull_request && format('https://{0}-{1}.vercel.app', github.event.pull_request.number, github.event.repository.name) || 'http://localhost:3000' }}
+
+      - name: Post Lighthouse results comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const report = fs.readFileSync('.lighthouseci/manifest.json', 'utf8');
+              const data = JSON.parse(report);
+              const failed = data.filter(r => !r.isPassed).length;
+              const total = data.length;
+              
+              let comment = `## ⚡ Lighthouse CI Results\n\n`;
+              comment += `**${total - failed}/${total}** audits passed\n\n`;
+              
+              if (failed > 0) {
+                comment += `### ❌ Failed Audits:\n`;
+                data.filter(r => !r.isPassed).forEach(r => {
+                  comment += `- **${r.url}**: `;
+                  Object.entries(r.summary).forEach(([key, value]) => {
+                    comment += `${key}: ${value.score * 100}% `;
+                  });
+                  comment += '\n';
+                });
+              } else {
+                comment += `### ✅ All audits passed!\n`;
+              }
+              
+              comment += `\n[View full report](${process.env.LHCI_GITHUB_APP_TOKEN ? 'https://storage.googleapis.com/lighthouse-infrastructure.appspot.com/reports/' + data[0].id + '.html' : '#'})`;
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            } catch (error) {
+              console.log('Could not post Lighthouse results comment:', error.message);
+            }
