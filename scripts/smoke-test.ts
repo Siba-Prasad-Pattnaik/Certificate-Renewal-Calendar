@@ -6,7 +6,7 @@
  * Usage: npx tsx scripts/smoke-test.ts --url=https://your-domain.com
  */
 
-import { program } from 'commander';
+import { Command } from 'commander';
 import https from 'https';
 import http from 'http';
 import fs from 'fs';
@@ -395,16 +395,25 @@ class SmokeTester {
 }
 
 // Main program
+const program = new Command();
+
 program
   .name('smoke-test')
   .description('Run smoke tests against a deployed portfolio application')
   .version('1.0.0')
-  .requiredOption('-u, --url <url>', 'Base URL to test (e.g., https://your-domain.com)')
-  .parse(process.argv);
+  .requiredOption('-u, --url <url>', 'Base URL to test (e.g., https://your-domain.com)');
+
+program.parse(process.argv);
 
 const options = program.opts();
 
 async function main() {
+  if (!options.url) {
+    console.error('Error: --url option is required');
+    program.help();
+    process.exit(1);
+  }
+
   const tester = new SmokeTester(options.url);
   const summary = await tester.runAllTests();
   tester.printSummary(summary);
